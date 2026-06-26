@@ -1,0 +1,20 @@
+[project]
+name = "sendbox"
+version = "0.1.0"
+description = "Run host-side git commands against repositories living inside incus containers."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Kacper Wolkiewicz", email = "kacper.wolkiewicz@reef.pl" }]
+keywords = ["incus", "git", "container", "mount", "cli"]
+dependencies = []
+
+[project.scripts]
+sendbox = "sendbox.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sendbox"]
