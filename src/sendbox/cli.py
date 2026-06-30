@@ -37,7 +37,9 @@ Arguments:
 Options:
   -r, --repo PATH      Select a repository by absolute path or by name when the
                        container holds more than one. Without it, the single
-                       repository found is used; if several exist you must choose.
+                       repository found is used; if several exist you are prompted
+                       to pick one interactively (or, with no terminal, asked to
+                       choose with --repo).
   -h, --help           Show this help and exit.
   -V, --version        Show the version and exit.
 
@@ -144,12 +146,28 @@ def _resolve_repository(client, container, repo_opt):
             listing = "\n  ".join(matches)
             raise SendboxError(f"'{repo_opt}' is ambiguous; matches:\n  {listing}")
         return matches[0]
-    if len(repos) > 1:
+    if len(repos) == 1:
+        return repos[0]
+    return _choose_repository(repos)
+
+
+def _choose_repository(repos):
+    """Pick one of several repositories interactively, falling back to an error
+    with a listing when there is no terminal to prompt on."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
         listing = "\n  ".join(repos)
         raise SendboxError(
             "multiple git repositories found; choose one with --repo:\n  " + listing
         )
-    return repos[0]
+    import questionary
+
+    choice = questionary.select(
+        "multiple git repositories found; choose one:",
+        choices=repos,
+    ).ask()
+    if choice is None:
+        raise SendboxError("no repository selected")
+    return choice
 
 
 def _completion(args):
