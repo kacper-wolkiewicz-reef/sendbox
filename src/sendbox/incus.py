@@ -10,10 +10,24 @@ import subprocess
 
 from .errors import SendboxError
 
-_FIND_GIT_REPOS = (
-    "find / \\( -path /proc -o -path /sys -o -path /dev -o -path /run \\) -prune "
-    "-o -type d -name .git -print -prune 2>/dev/null"
-)
+_PRUNED_PATHS = ("/proc", "/sys", "/dev", "/run")
+_PRUNED_DIR_NAMES = (".cache", "node_modules", ".venv", "venv", ".tox")
+
+
+def _build_find_command():
+    """Build the ``find`` that lists git repositories while skipping system and
+    cache trees (e.g. the uv git cache under ``.cache``) that hold repositories
+    sendbox should never offer."""
+    prune_terms = [f"-path {path}" for path in _PRUNED_PATHS]
+    prune_terms += [f"-name {name}" for name in _PRUNED_DIR_NAMES]
+    prune_expr = " -o ".join(prune_terms)
+    return (
+        f"find / \\( {prune_expr} \\) -prune "
+        "-o -type d -name .git -print -prune 2>/dev/null"
+    )
+
+
+_FIND_GIT_REPOS = _build_find_command()
 
 
 class IncusClient:

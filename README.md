@@ -77,8 +77,10 @@ sendbox agent-1 pull --rebase
 sendbox --repo backend agent-1 log --oneline -n 5
 ```
 
-If the container holds **more than one** repository, `sendbox` lists them and asks
-you to pick one with `--repo` (an absolute path, or just the repo's directory name).
+If the container holds **more than one** repository, `sendbox` prompts you to pick
+one interactively (arrow keys + Enter). When there is no terminal to prompt on
+(e.g. output is piped), it lists the repositories and asks you to choose with
+`--repo` (an absolute path, or just the repo's directory name).
 
 Run `sendbox --help` for the full help.
 
