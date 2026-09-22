@@ -1,3 +1,3 @@
-"""sendbox — run host-side git commands against repositories inside incus containers."""
+"""sendbox — run git inside incus containers with ssh authentication from the host."""
 
 __version__ = "0.1.0"

@@ -1,49 +1,57 @@
 # sendbox
 
-Run **host-side git commands** against repositories that live **inside incus
-containers** — without ever giving the container your git remote credentials.
+Run **git inside incus containers** while the **ssh authentication happens on the
+host** — without ever giving the container your git remote credentials.
 
-`sendbox` finds a git repository inside a container, **briefly mounts it onto the
-host with `incus file mount`**, runs your git command against it using your own
-credentials, and then **always removes the mount** — on success, on failure, on
-`Ctrl-C`, on `SIGTERM`. The mount is never left behind.
+`sendbox` finds a git repository inside a container and runs your git command
+**there**, as the repository's owner. Whenever that git needs an ssh connection
+(`push`, `pull`, `fetch`, ...), the connection is made by **ssh on the host**, with
+your keys, agent and `~/.ssh/config`; only the git protocol bytes travel back into
+the container. Nothing is mounted, and the container never sees a key or an agent
+socket.
 
 ## Why
 
 You run untrusted agents inside incus containers (full root, making changes to
 checked-out repositories). You do **not** want those containers to hold push/pull
-credentials, so the host must do the pushing and pulling. `sendbox` is the bridge:
-keys stay on the host, the repo stays in the container.
+credentials, so the host must do the authenticating. `sendbox` is the bridge:
+keys stay on the host, the repo — and git itself — stay in the container.
 
 ## How it works
 
 1. Checks the container is running (via `incus query`).
 2. Runs `find` **inside the container** (via `incus exec`) to locate git repositories.
-3. Mounts the repository onto a temporary mountpoint with `incus file mount`
-   (an sshfs mount served by incus). This command is foreground and blocking, so
-   sendbox runs it as a background process and waits until the mount is live.
-4. Runs `git -C <mountpoint> <your command>` with your identity.
-5. Signals the mount process to unmount cleanly, with a `fusermount`/`umount`
-   fallback, and removes the temporary mountpoint — **guaranteed**.
+3. Creates a private session directory inside the container, owned by the
+   repository's owner. It holds a tiny POSIX-sh **ssh shim** and a FIFO on which
+   the shim asks the host for connections; a helper `incus exec` listens on it.
+4. Runs `git <your command>` in the repository with `incus exec`, as the owner of
+   the repository, with `GIT_SSH_COMMAND` pointing at the shim.
+5. When git runs "ssh", the shim hands its arguments to the host through a
+   per-connection pair of FIFOs. sendbox **validates** them (they must look
+   exactly like what git passes to ssh, for `git-upload-pack`,
+   `git-receive-pack` or `git-upload-archive`), rebuilds a hardened ssh command
+   line from scratch and runs it on the host, pumping bytes between it and the
+   shim over two helper `incus exec` streams. ssh's exit code goes back to git.
+6. Stops every helper and removes the session directory — **guaranteed**.
 
-The "always unmount" guarantee is enforced by three independent layers: a
-`try/finally`, an `atexit` hook, and `SIGINT`/`SIGTERM`/`SIGHUP` handlers. If the
-mount process does not clean up by itself, sendbox falls back to
-`fusermount -u`, then a lazy `fusermount -uz` / `umount -l`.
+The "always clean up" guarantee is enforced by three independent layers: a
+context manager, an `atexit` hook, and `SIGINT`/`SIGTERM`/`SIGHUP` handlers.
+The container's configuration is never modified (no devices, no proxies).
 
-Because writes travel through incus' SFTP server (which acts as the container's
-root), files are created with the **correct in-container ownership** — there is no
-host-vs-container UID mismatch to clean up afterwards.
+Because git runs inside the container as the repository's owner, files are
+created with the **correct ownership**, and the repository is never touched
+through a network filesystem.
 
 ## Requirements
 
 - `incus` on the host, with the invoking user able to talk to it.
-- `sshfs` on the host (used by `incus file mount`).
-- `git` on the host.
+- `ssh` (OpenSSH client) on the host.
+- `git` and a POSIX shell with `mkfifo`, `mktemp`, `stat` and `cat` inside the
+  container (coreutils or busybox).
 - A **running** target container.
 - (Optional) `bash-completion` for the bash completion script.
 
-No root or `sudo` is required: `incus file mount` uses FUSE, and git runs as you.
+No root or `sudo` is required on the host.
 
 ## Installation
 
@@ -86,9 +94,19 @@ Run `sendbox --help` for the full help.
 
 ## Credentials
 
-git runs as the user who invoked `sendbox`, so it reads your `~/.gitconfig` and ssh
-finds your `~/.ssh` keys — exactly as a normal `git push` would. Keep your
-deploy/push keys on the host as usual.
+ssh runs on the host as the user who invoked `sendbox`, so it uses your
+`~/.ssh/config` (host aliases work), `known_hosts`, keys and `ssh-agent` — exactly
+as a normal `git push` would. Keep your deploy/push keys on the host as usual.
+
+Two differences from a plain `git push`, because the terminal belongs to git
+inside the container while it runs:
+
+- ssh runs with `BatchMode=yes`: it cannot ask for a passphrase or confirm an
+  unknown host key. Load passphrase-protected keys into `ssh-agent`, and connect
+  to a new server once by hand (e.g. `ssh -T git@github.com`) to record its key.
+- Only **ssh** remotes get host credentials. `https` remotes are fetched and
+  pushed from inside the container with whatever credentials it has (usually
+  none).
 
 ## Shell completion
 
@@ -114,11 +132,24 @@ sendbox completion zsh > ~/.zfunc/_sendbox
 #   autoload -Uz compinit && compinit
 ```
 
-## Safety
+## Security model
 
-- The mount lives only for the duration of a single git command.
-- The mount is **always** torn down — there is no flag to keep it.
-- The temporary mountpoint is created under the system temp dir and removed after use.
+- The container never gets a key, an agent socket or a forwarded port. Each
+  connection it asks for is announced on your terminal
+  (`sendbox: ssh git@github.com git-receive-pack 'org/repo.git'`).
+- Everything the container sends is treated as hostile: anything but the exact
+  argument shape git produces is refused, and the host ssh command line is
+  rebuilt from the validated values, with `BatchMode=yes`, `ForwardAgent=no`,
+  `ForwardX11=no`, `ClearAllForwardings=yes`, `PermitLocalCommand=no`,
+  `GSSAPIDelegateCredentials=no`, `Tunnel=no` and `RequestTTY=no`.
+- The relay exists only while your git command runs, and serves at most 16
+  connections at once.
+- Within that window, a process inside the container **can** use the relay for
+  git transport commands against any server and repository your ssh identity
+  reaches — just as it controls which remote your `sendbox ... push` goes to.
+  Scope your keys accordingly (e.g. per-repository deploy keys).
+- Only a `SIGKILL` of `sendbox` itself can leave the session directory behind
+  (under `/tmp/sendbox.*` in the container); it holds no secrets.
 
 ## License
 

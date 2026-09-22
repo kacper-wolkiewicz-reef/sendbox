@@ -1,19 +1,21 @@
 """Command line interface: argument parsing and orchestration."""
 
 import os
-import shutil
 import sys
 
 from . import __version__
 from .completion import print_completion
+from .console import Console
 from .errors import SendboxError
-from .git import run_git
+from .git import ContainerGit
 from .incus import IncusClient
-from .mounting import IncusFileMount
+from .relay import SshRelay
+from .session import ContainerSession
+from .teardown import Teardown
 
 _USAGE = "sendbox [--repo PATH] <container> <git command> [args...]"
 
-_HELP = f"""sendbox — run host-side git commands against repositories inside incus containers.
+_HELP = f"""sendbox — run git inside incus containers with ssh authentication from the host.
 
 Usage:
   {_USAGE}
@@ -21,11 +23,14 @@ Usage:
   sendbox --help | --version
 
 Description:
-  sendbox lets you run git on the host against a repository that lives inside an
-  incus container. The repository is briefly mounted onto the host with
-  `incus file mount`, the git command runs against it using your credentials,
-  and the mount is ALWAYS removed afterwards — even if the command fails or is
-  interrupted.
+  sendbox runs a git command inside an incus container, in a repository that
+  lives there, as the user who owns that repository. Whenever that git needs an
+  ssh connection (push, pull, fetch, ...), the connection is made by ssh on the
+  host, with your keys, agent and ~/.ssh/config, and only the git protocol bytes
+  travel back into the container. Nothing is mounted, and the container never
+  sees a key or an agent socket. Everything sendbox creates (a small temporary
+  directory in the container, helper processes) is ALWAYS removed afterwards —
+  even if the command fails or is interrupted.
 
   This is useful when whatever runs inside the container must not hold git remote
   credentials: you keep the keys on the host and push/pull from there.
@@ -49,8 +54,10 @@ Examples:
   sendbox --repo backend agent-1 pull --rebase
 
 Notes:
-  * Uses `incus file mount`, which needs sshfs on the host (no root required).
-  * git runs as you, so your ssh keys and git config are used for authentication.
+  * The container needs git and a POSIX shell; the host needs ssh.
+  * Host ssh runs with BatchMode=yes: keep passphrase-protected keys in ssh-agent
+    and the servers' host keys in known_hosts.
+  * Only ssh remotes get host credentials; https remotes run from the container.
   * Shell completion: `sendbox completion bash` / `sendbox completion zsh`.
 """
 
@@ -108,24 +115,21 @@ def _extract_repo_option(argv):
     return repo, argv[i:]
 
 
-def _require_sshfs():
-    """Abort early with a clear message if the host lacks sshfs."""
-    if shutil.which("sshfs") is None:
-        raise SendboxError(
-            "`incus file mount` needs sshfs on the host, but it was not found; "
-            "please install sshfs"
-        )
-
-
 def _run(container, git_args, repo_opt):
-    """Mount the selected repository, run git against it, and unmount."""
-    _require_sshfs()
+    """Run git in the selected repository with its ssh relayed through the host."""
     client = IncusClient()
     client.ensure_running(container)
     repo = _resolve_repository(client, container, repo_opt)
-    source = f"{container}{repo}"
-    with IncusFileMount(source) as mountpoint:
-        return run_git(mountpoint, git_args)
+    session = ContainerSession(client, container, repo)
+    relay = SshRelay(session, Console())
+    git = ContainerGit(session)
+    with Teardown() as teardown:
+        teardown.push(session.close)
+        session.open()
+        teardown.push(relay.close)
+        relay.start()
+        teardown.push(git.stop)
+        return git.run(git_args)
 
 
 def _resolve_repository(client, container, repo_opt):
