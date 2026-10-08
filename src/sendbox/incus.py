@@ -67,14 +67,24 @@ class IncusClient:
         return result.stdout
 
     def state(self, container):
-        """Return the runtime state of a container as a dict."""
-        raw = self._run(["query", f"/1.0/instances/{container}/state"])
+        """Return the runtime state of a container as a dict.
+
+        Looked up with ``incus list`` rather than ``incus query``: only the former
+        honours the remote and project selected in the incus client configuration,
+        so containers outside the ``default`` project of the local server are found.
+        """
+        remote, separator, name = container.rpartition(":")
+        raw = self._run(["list", f"{remote}{separator}^{name}$", "--format", "json"])
         try:
-            return json.loads(raw)
+            instances = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise SendboxError(
                 f"unexpected incus response for '{container}': {exc}"
             ) from exc
+        for instance in instances:
+            if instance.get("name") == name:
+                return instance.get("state") or {}
+        raise SendboxError(f"container '{container}' does not exist")
 
     def ensure_running(self, container):
         """Validate that the container exists and is currently running."""
