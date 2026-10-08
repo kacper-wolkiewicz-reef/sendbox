@@ -19,7 +19,8 @@ keys stay on the host, the repo — and git itself — stay in the container.
 
 ## How it works
 
-1. Checks the container is running (via `incus query`).
+1. Checks the container is running (via `incus list`, so the remote and project
+   selected in the incus client are honoured).
 2. Runs `find` **inside the container** (via `incus exec`) to locate git repositories.
 3. Creates a private session directory inside the container, owned by the
    repository's owner. It holds a tiny POSIX-sh **ssh shim** and a FIFO on which
